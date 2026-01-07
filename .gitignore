@@ -1,5 +1,5 @@
 models/
-ST_GCN_TWO_STREAM/
+ST-GCN_torchtrt/
 TensorRT/
 *pt
 *.h5
