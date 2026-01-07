@@ -1,7 +1,7 @@
 models/
-ST-GCN_torchtrt/
 TensorRT/
 *pt
 *.h5
 *.onnx
 *.engine
+ST-GCN_torchtrt/
