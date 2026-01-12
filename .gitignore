@@ -5,3 +5,11 @@ TensorRT/
 *.onnx
 *.engine
 ST-GCN_torchtrt/
+exported_models/
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyc
+*.pyo
