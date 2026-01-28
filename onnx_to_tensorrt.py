@@ -8,10 +8,10 @@ import tensorrt as trt
 import os
 import argparse
 
-# Use INFO level for more detailed error messages
-TRT_LOGGER = trt.Logger(trt.Logger.INFO)
+# Logger will be configured based on verbosity level
+TRT_LOGGER = None
 
-def build_engine(onnx_path, engine_path, precision='fp16', workspace_size=4, disable_optimizations=False):
+def build_engine(onnx_path, engine_path, precision='fp16', workspace_size=4, disable_optimizations=False, verbose=False, optimization_level=3):
     """
     Build TensorRT engine from ONNX model.
     
@@ -21,10 +21,19 @@ def build_engine(onnx_path, engine_path, precision='fp16', workspace_size=4, dis
         precision: 'fp32', 'fp16', or 'int8'
         workspace_size: Workspace size in GB (default: 4GB)
         disable_optimizations: Disable certain optimizations to avoid graph optimizer errors
+        verbose: Enable verbose logging (VERBOSE level)
+        optimization_level: Builder optimization level 0-5 (default: 3, higher=better performance but slower build)
     
     Returns:
         bool: True if successful, False otherwise
     """
+    # Configure logger based on verbosity
+    global TRT_LOGGER
+    if verbose:
+        TRT_LOGGER = trt.Logger(trt.Logger.VERBOSE)
+        print("VERBOSE logging enabled - detailed build information will be displayed")
+    else:
+        TRT_LOGGER = trt.Logger(trt.Logger.INFO)
     print(f"\n{'='*60}")
     print(f"Building TensorRT Engine")
     print(f"{'='*60}")
@@ -89,6 +98,23 @@ def build_engine(onnx_path, engine_path, precision='fp16', workspace_size=4, dis
             config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
         except AttributeError:
             pass
+        
+        # Set profiling verbosity for detailed layer timing information
+        try:
+            config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+            if verbose:
+                print("Profiling verbosity set to DETAILED (enables layer-by-layer timing)")
+        except AttributeError:
+            if verbose:
+                print("WARNING: ProfilingVerbosity not available in this TensorRT version")
+        
+        # Set builder optimization level (0-5, higher is better but slower to build)
+        try:
+            config.builder_optimization_level = optimization_level
+            print(f"Builder optimization level set to {optimization_level} (0=fastest build, 5=best performance)")
+        except AttributeError:
+            if verbose:
+                print("WARNING: builder_optimization_level not available in this TensorRT version")
         
         # Set precision
         if precision == 'fp16':
@@ -178,15 +204,28 @@ def build_engine(onnx_path, engine_path, precision='fp16', workspace_size=4, dis
                 engine = runtime.deserialize_cuda_engine(serialized_engine)
                 
                 if engine:
-                    num_bindings = engine.num_bindings
-                    print(f"  Number of bindings: {num_bindings}")
-                    for i in range(num_bindings):
-                        name = engine.get_binding_name(i)
-                        shape = engine.get_binding_shape(i)
-                        dtype = trt.nptype(engine.get_binding_dtype(i))
-                        is_input = engine.get_binding_name(i) and engine.binding_is_input(i)
-                        io_type = "INPUT" if is_input else "OUTPUT"
-                        print(f"  [{i}] {name}: {shape} ({dtype}) [{io_type}]")
+                    # TensorRT 10.x API: use num_io_tensors instead of num_bindings
+                    try:
+                        num_tensors = engine.num_io_tensors
+                        print(f"  Number of I/O tensors: {num_tensors}")
+                        for i in range(num_tensors):
+                            name = engine.get_tensor_name(i)
+                            shape = engine.get_tensor_shape(name)
+                            dtype = engine.get_tensor_dtype(name)
+                            mode = engine.get_tensor_mode(name)
+                            io_type = "INPUT" if mode == trt.TensorIOMode.INPUT else "OUTPUT"
+                            print(f"  [{i}] {name}: {shape} ({dtype}) [{io_type}]")
+                    except AttributeError:
+                        # Fallback for TensorRT < 10.0
+                        num_bindings = engine.num_bindings
+                        print(f"  Number of bindings: {num_bindings}")
+                        for i in range(num_bindings):
+                            name = engine.get_binding_name(i)
+                            shape = engine.get_binding_shape(i)
+                            dtype = trt.nptype(engine.get_binding_dtype(i))
+                            is_input = engine.binding_is_input(i)
+                            io_type = "INPUT" if is_input else "OUTPUT"
+                            print(f"  [{i}] {name}: {shape} ({dtype}) [{io_type}]")
             except Exception as e:
                 print(f"  Could not deserialize engine for info: {e}")
                 print(f"  Engine saved successfully, but info display skipped")
@@ -359,10 +398,15 @@ if __name__ == "__main__":
                        default='fp16', help='Precision mode (default: fp16)')
     parser.add_argument('--workspace', type=int, default=4,
                        help='Workspace size in GB (default: 4)')
+    parser.add_argument('--verbose', action='store_true',
+                       help='Enable verbose logging for detailed build information')
+    parser.add_argument('--optimization-level', type=int, default=3, choices=[0, 1, 2, 3, 4, 5],
+                       help='Builder optimization level (0-5): 0=fastest build, 5=best runtime performance (default: 3)')
     
     args = parser.parse_args()
     
-    success = build_engine(args.onnx, args.engine, args.precision, args.workspace)
+    success = build_engine(args.onnx, args.engine, args.precision, args.workspace, 
+                          verbose=args.verbose, optimization_level=args.optimization_level)
     
     if not success:
         exit(1)
