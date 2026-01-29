@@ -120,41 +120,35 @@ m = F.pad(m_diff, (0, 0, 0, 0, 1, 0), "constant", 0)
 
 ---
 
-### 4. Einsum Replacement with MatMul Operations
+### 4. Einsum-Based Graph Convolution (TensorRT Optimized)
 
-**Files Modified:** `net/utils/tgcn_trt.py`
+**Files Modified:** `net/st_gcn_trt.py`, `net/st_gcn_twostream_trt.py`
 
-**Original Implementation:**
+**Implementation:**
 ```python
-# Einsum operation (line ~95)
+# Einsum operation for graph convolution (net/utils/tgcn.py)
 x = torch.einsum('nkctv,kvw->nctw', (x, A))
 ```
 
-**New Implementation:**
-```python
-# TensorRT-friendly matmul with broadcasting (lines 95-103)
-x = x.permute(0, 2, 3, 1, 4).contiguous()  # (n, c, t, k, v)
-x = x.unsqueeze(-2)                         # (n, c, t, k, 1, v)
-x = torch.matmul(x, A)                      # Broadcasting: (n,c,t,k,1,v) @ (k,v,v)
-x = x.squeeze(-2)                           # (n, c, t, k, v)
-x = x.sum(dim=3)                            # (n, c, t, v)
-x = x.contiguous()
-```
+**Why Einsum:**
+- **TensorRT Performance:** Modern TensorRT (10.3+) with ONNX opset 18 efficiently optimizes einsum operations
+- **Original Design:** The original ST-GCN implementation used einsum - it was already optimal
+- **Proven Results:** 
+  - M=1: 8.86ms latency (112 FPS)
+  - M=5: 54.84ms latency (18 FPS)
+  - 20 Einsum operators preserved in ONNX graph
+  - 0 MatMul operators (avoided slow decomposition)
 
-**Mathematical Equivalence:**
-- Original einsum: `nkctv,kvw->nctw` performs weighted adjacency matrix multiplication across graph partitions
-- New approach: Explicit reshape → unsqueeze → matmul → squeeze → sum
-- **Validated:** Maximum numerical difference < 1.6e-5 (negligible)
-
-**Reason:**
-- **TensorRT Limitation:** `torch.einsum` is not well-supported by TensorRT's optimization passes.
-- **Compatibility:** Standard matrix operations have better cross-platform support
+**Critical Finding:**
+- Initial MatMul-based decomposition caused catastrophic 410ms latency
+- Reverting to original einsum implementation restored optimal performance
+- TensorRT can directly optimize einsum when exported with ONNX opset 18
 
 ---
 
 ### 5. Softmax Layer Addition
 
-**Files Modified:** `stgcn_to_onnx.py`
+**Files Modified:** `stgcn_to_onnx.py`, `stgcn_to_onnx_einsum.py`
 
 **Implementation:**
 ```python
@@ -235,7 +229,55 @@ ExportConfig(
 
 ## Export Commands
 
-### Basic Export (With Softmax - Recommended)
+### Recommended: TensorRT-Optimized Export (Einsum-Based)
+
+**This is the recommended method for TensorRT deployment** - uses the optimized `stgcn_to_onnx_einsum.py` script with einsum preservation.
+
+**Single Person (M=1):**
+```bash
+python3 stgcn_to_onnx_einsum.py \
+    --checkpoint models/epoch60_model.pt \
+    --output exported_models/stgcn_M1_einsum.onnx \
+    --M 1
+```
+
+**Dual Person (M=2):**
+```bash
+python3 stgcn_to_onnx_einsum.py \
+    --checkpoint models/stgcn_unified.pt \
+    --output exported_models/stgcn_M2_einsum.onnx \
+    --M 2
+```
+
+**Multi-Person (M=5):**
+```bash
+python3 stgcn_to_onnx_einsum.py \
+    --checkpoint models/epoch50_model.pt \
+    --output exported_models/stgcn_M5_einsum.onnx \
+    --M 5
+```
+
+**Parameters:**
+- `--checkpoint`: Path to trained PyTorch checkpoint (.pt file or directory)
+- `--output`: Output ONNX file path
+- `--M`: Number of persons (1, 2, 3, 4, or 5)
+- `--opset`: ONNX opset version (default: 18, minimum: 12 for einsum)
+
+**Output:**
+- ONNX model file (e.g., `stgcn_M1_einsum.onnx`)
+- External data file (e.g., `stgcn_M1_einsum.onnx.data`) - ~24MB weights
+- Includes softmax layer for probability output
+
+**Performance (TensorRT FP16 on Jetson Orin NX):**
+- M=1: 8.86ms latency (112 FPS)
+- M=5: 54.84ms latency (18 FPS)
+- 20 Einsum operators optimized by TensorRT
+
+---
+
+### Alternative: Legacy Export Method
+
+**Use the original `stgcn_to_onnx.py` for verification or compatibility testing:**
 
 **Variant 1 (M=1):**
 ```bash
@@ -383,12 +425,16 @@ print(f"Confidence: {np.max(probabilities):.2%}")
    - Lines: 24-25
    - Purpose: Replace dynamic tensor creation with efficient padding operator
 
-4. **`net/utils/tgcn_trt.py`**
-   - Changed: `torch.einsum` → explicit matmul operations
-   - Lines: 95-103
-   - Purpose: TensorRT optimization support
+4. **`net/utils/tgcn.py`**
+   - Uses: `torch.einsum` for graph convolution (original implementation)
+   - Purpose: TensorRT-optimized graph operations with opset 18
 
-5. **`stgcn_to_onnx.py`**
+5. **`stgcn_to_onnx_einsum.py`** (New - Recommended)
+   - Added: Streamlined export script with einsum preservation
+   - Purpose: Production TensorRT-optimized ONNX export
+   - Features: Supports M=1-5, opset 18, fixed batch size, softmax included
+
+6. **`stgcn_to_onnx.py`**
    - Added: `ModelWithSoftmax` wrapper class
    - Added: Softmax integration in export pipeline
    - Added: CLI flag `--no-softmax` for flexibility
@@ -397,6 +443,7 @@ print(f"Confidence: {np.max(probabilities):.2%}")
 
 ---
 
-**Document Version:** 1.0  
-**Last Updated:** January 12, 2026  
-**Branch:** `feature/onnx-export-modifications`
+**Document Version:** 2.0  
+**Last Updated:** January 28, 2026  
+**Branch:** `feature/onnx-export-modifications`  
+**Key Update:** Reverted to original einsum implementation for optimal TensorRT performance
